@@ -1,0 +1,32 @@
+# Secrets
+.env
+*.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated FIRMS data
+data/firms/*.csv
+data/firms/*.json
+
+# Satellite data
+satellite/raw/*
+satellite/chips/*
+
+# ML models
+ml/models/*.joblib
+ml/models/*.pkl
