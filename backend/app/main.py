@@ -1,19 +1,35 @@
 from fastapi import FastAPI
 
-from app.api.firms import router as firms_router
+from app.api.classification import (
+    router as classification_router,
+)
+from app.api.firms import (
+    router as firms_router,
+)
 
 
 app = FastAPI(
     title="TheeFinder API",
     description=(
-        "AI-enabled geospatial platform for detection, classification, "
-        "and monitoring of industrial fires and persistent thermal sources."
+        "AI-enabled geospatial platform for detection, "
+        "classification, and monitoring of industrial "
+        "fires and persistent thermal sources."
     ),
-    version="0.1.0",
+    version="0.2.0",
 )
 
-app.include_router(firms_router)
 
+# =========================================================
+# ROUTERS
+# =========================================================
+
+app.include_router(firms_router)
+app.include_router(classification_router)
+
+
+# =========================================================
+# ROOT
+# =========================================================
 
 @app.get("/")
 def root():
@@ -21,8 +37,21 @@ def root():
         "application": "TheeFinder",
         "status": "running",
         "study_area": "Chennai",
+        "version": "0.2.0",
+        "capabilities": [
+            "NASA FIRMS thermal detection",
+            "Industrial-context analysis",
+            "ESA WorldCover analysis",
+            "Historical persistence analysis",
+            "Stage-A AI classification",
+            "Stage-B industrial classification",
+        ],
     }
 
+
+# =========================================================
+# HEALTH
+# =========================================================
 
 @app.get("/health")
 def health():
