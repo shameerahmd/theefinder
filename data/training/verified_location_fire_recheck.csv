@@ -1,0 +1,3 @@
+candidate_id,event_name,facility_latitude,facility_longitude,location_source,incident_firms_rows,nearby_3km_rows,strict_postfire_rows,strongest_latitude,strongest_longitude,strongest_distance_m,strongest_frp_mw,strongest_source,strongest_acquisition_utc,prefire_detections_30d,prefire_active_days_30d,status
+BIF-01,AksharChem India Indrad VS Plant Fire,23.2808185848,72.4062216144,OFFICIAL_COMPANY_WEBSITE_MAP,0,0,0,,,,,,,,,REJECT_NO_FIRMS
+BIF-02,Gopal Snacks Rajkot Metoda Plant Fire,22.23978598,70.68381267,OFFICIAL_COMPANY_WEBSITE_MAP,0,0,0,,,,,,,,,REJECT_NO_FIRMS

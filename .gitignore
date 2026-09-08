@@ -30,3 +30,30 @@ satellite/chips/*
 # ML models
 ml/models/*.joblib
 ml/models/*.pkl
+# Environment / secrets
+.env
+*.env
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node / Next.js
+node_modules/
+.next/
+
+# Local/raw TheeFinder data
+data/ground_truth/
+data/osm/
+
+# IDE / assistant files
+.vscode/
+.idea/
+frontend/AGENTS.md
+frontend/CLAUDE.md
+
+# OS files
+.DS_Store
+Thumbs.db

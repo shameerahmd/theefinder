@@ -1,76 +1,119 @@
-import { NextRequest, NextResponse } from "next/server";
-
 export const dynamic = "force-dynamic";
 
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
+function clamp(
+  value: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return Math.min(
+    maximum,
+    Math.max(
+      minimum,
+      value,
+    ),
+  );
 }
 
-export async function GET(request: NextRequest) {
-  const searchParams = request.nextUrl.searchParams;
 
-  const rawDays = Number(searchParams.get("days") ?? "5");
+export async function GET(
+  request: Request,
+) {
+  const searchParams =
+    new URL(request.url).searchParams;
 
-  const rawMaxDetections = Number(searchParams.get("max_detections") ?? "25");
+  const requestedDays = Number(
+    searchParams.get("days") ?? "5",
+  );
 
-  const days = clamp(Number.isFinite(rawDays) ? rawDays : 5, 1, 5);
+  const requestedMaximum = Number(
+    searchParams.get(
+      "max_detections",
+    ) ?? "25",
+  );
+
+  const days = clamp(
+    Number.isFinite(requestedDays)
+      ? requestedDays
+      : 5,
+    1,
+    5,
+  );
 
   const maxDetections = clamp(
-    Number.isFinite(rawMaxDetections) ? rawMaxDetections : 25,
+    Number.isFinite(requestedMaximum)
+      ? requestedMaximum
+      : 25,
     1,
     100,
   );
 
-  const backendBaseUrl =
-    process.env.THEEFINDER_BACKEND_URL ?? "http://127.0.0.1:8000";
+  const backendBase =
+    (
+      globalThis as typeof globalThis & {
+        process?: {
+          env?: {
+            THEEFINDER_BACKEND_URL?: string;
+          };
+        };
+      }
+    ).process?.env?.THEEFINDER_BACKEND_URL ??
+    "http://127.0.0.1:8000";
 
   const backendUrl =
-    `${backendBaseUrl}` +
+    `${backendBase}` +
     `/api/classification/chennai` +
     `?days=${days}` +
     `&max_detections=${maxDetections}`;
 
   try {
-    const response = await fetch(backendUrl, {
-      method: "GET",
-
-      cache: "no-store",
-
-      headers: {
-        Accept: "application/json",
+    const response = await fetch(
+      backendUrl,
+      {
+        cache: "no-store",
       },
-    });
+    );
 
-    const responseText = await response.text();
+    const text =
+      await response.text();
 
-    let responseData: unknown;
+    let data: unknown;
 
     try {
-      responseData = JSON.parse(responseText);
+      data = JSON.parse(text);
     } catch {
-      responseData = {
-        detail: responseText || "FastAPI returned an invalid response.",
+      data = {
+        detail:
+          text ||
+          "Backend returned an invalid response.",
       };
     }
 
-    return NextResponse.json(responseData, {
-      status: response.status,
-    });
+    return Response.json(
+      data,
+      {
+        status: response.status,
+      },
+    );
   } catch (error) {
     const message =
       error instanceof Error
         ? error.message
-        : "Unknown backend connection error.";
+        : "Unknown backend error.";
 
-    return NextResponse.json(
+    return Response.json(
       {
-        application: "TheeFinder",
+        application:
+          "TheeFinder",
 
-        detail: "Unable to connect to the TheeFinder FastAPI backend.",
+        detail:
+          "Unable to connect to the " +
+          "TheeFinder FastAPI backend.",
 
-        backend_url: backendUrl,
+        backend:
+          backendUrl,
 
-        error: message,
+        error:
+          message,
       },
       {
         status: 502,
