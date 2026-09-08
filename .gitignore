@@ -57,3 +57,5 @@ frontend/CLAUDE.md
 # OS files
 .DS_Store
 Thumbs.db
+
+src/
