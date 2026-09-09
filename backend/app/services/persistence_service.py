@@ -1,7 +1,8 @@
 from datetime import date, datetime, timedelta
 from io import StringIO
 from math import atan2, cos, radians, sin, sqrt
-
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import requests
 
@@ -172,7 +173,7 @@ def fetch_single_source(
 
     return result
 
-
+@lru_cache(maxsize=16)
 def fetch_firms_date_range(
     start_date: date,
     end_date: date,
@@ -197,8 +198,18 @@ def fetch_firms_date_range(
 
     source_frames = []
 
-    for source in VIIRS_SOURCES:
+    # --------------------------------------------------------
+    # Download S-NPP, NOAA-20 and NOAA-21 concurrently.
+    #
+    # Each individual source still performs its <=5 day
+    # chunks sequentially. This limits concurrency to three
+    # FIRMS requests at a time instead of launching all
+    # historical chunks simultaneously.
+    # --------------------------------------------------------
 
+    def download_source(
+        source: str,
+    ):
         print()
         print(
             f"Downloading {source}"
@@ -210,9 +221,40 @@ def fetch_firms_date_range(
             end_date=end_date,
         )
 
-        if not dataframe.empty:
-            source_frames.append(
-                dataframe
+        return source, dataframe
+
+
+    with ThreadPoolExecutor(
+        max_workers=min(
+            3,
+            len(VIIRS_SOURCES),
+        )
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                download_source,
+                source,
+            )
+            for source in VIIRS_SOURCES
+        ]
+
+        for future in futures:
+
+            source, dataframe = (
+                future.result()
+            )
+
+            if not dataframe.empty:
+
+                source_frames.append(
+                    dataframe
+                )
+
+            print(
+                f"Historical FIRMS complete: "
+                f"{source} "
+                f"({len(dataframe)} rows)"
             )
 
     if not source_frames:

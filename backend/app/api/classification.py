@@ -1,4 +1,6 @@
-﻿from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 import pandas as pd
@@ -25,11 +27,17 @@ from app.services.firms_service import (
 )
 
 from app.services.model_service import (
+    PERSISTENCE_DAYS,
     ModelServiceError,
     classify_detection,
     get_model_status,
 )
 
+
+
+from app.services.persistence_service import (
+    fetch_firms_date_range,
+)
 
 router = APIRouter(
     prefix="/api/classification",
@@ -272,7 +280,15 @@ def firms_row_to_detection(
             ),
 
         "firms_source":
-            FIRMS_SOURCE,
+    (
+        FIRMS_SOURCE
+        if is_missing(
+            row.get("firms_source")
+        )
+        else str(
+            row.get("firms_source")
+        )
+    ),
     }
 
 
@@ -332,163 +348,372 @@ def classify_chennai(
         max_detections
     ).copy()
 
+    # =====================================================
+    # SHARED FIRMS PERSISTENCE HISTORY
+    #
+    # Fetch one superset historical window for every
+    # selected detection in this API request.
+    #
+    # analyse_persistence() will still apply the exact
+    # event-specific 30-day date filter for each detection.
+    # =====================================================
+
+    shared_historical_dataframe: pd.DataFrame | None = None
+
+    try:
+
+        event_dates = [
+
+            pd.to_datetime(
+                build_acquisition_utc(row),
+                utc=True,
+            ).date()
+
+            for _, row
+            in selected.iterrows()
+        ]
+
+        earliest_event_date = min(
+            event_dates
+        )
+
+        latest_event_date = max(
+            event_dates
+        )
+
+        shared_history_start = (
+            earliest_event_date
+            -
+            timedelta(
+                days=PERSISTENCE_DAYS
+            )
+        )
+
+        shared_history_end = (
+            latest_event_date
+            -
+            timedelta(days=1)
+        )
+
+        print()
+        print(
+            "Prefetching ONE shared FIRMS "
+            "persistence window:"
+        )
+
+        print(
+            f"{shared_history_start} -> "
+            f"{shared_history_end}"
+        )
+
+        shared_historical_dataframe = (
+            fetch_firms_date_range(
+                shared_history_start,
+                shared_history_end,
+            )
+        )
+
+        print(
+            "Shared FIRMS history ready: "
+            f"{len(shared_historical_dataframe)} rows"
+        )
+
+    except Exception as exc:
+
+        # Do not crash the endpoint.
+        #
+        # classify_detection() will use its existing
+        # persistence fallback if shared prefetch fails.
+
+        print(
+            "Shared FIRMS history prefetch failed: "
+            f"{exc}"
+        )
+
+        shared_historical_dataframe = None
+
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
 
-    for index, row in selected.iterrows():
+    # =====================================================
+    # CONTROLLED PARALLEL CLASSIFICATION
+    #
+    # Only model/context enrichment runs concurrently.
+    #
+    # PostGIS writes and result aggregation remain on the
+    # main thread to avoid concurrent database mutations.
+    # =====================================================
+
+    def classify_selected_row(
+        item: tuple[Any, pd.Series],
+    ) -> dict[str, Any]:
+
+        index, row = item
 
         try:
-            detection = firms_row_to_detection(
-                row
+
+            detection = (
+                firms_row_to_detection(
+                    row
+                )
             )
 
             classification = (
                 classify_detection(
-                    detection
+                    detection,
+                    historical_dataframe=
+                        shared_historical_dataframe,
                 )
             )
 
-
-            stage_a = classification[
-                "stage_a"
-            ]
-
-            stage_b = classification[
-                "stage_b"
-            ]
-
-            results.append(
-                {
-                    "latitude":
-                        detection["latitude"],
-
-                    "longitude":
-                        detection["longitude"],
-
-                    "frp":
-                        detection["frp"],
-
-                    "confidence":
-                        detection["confidence"],
-
-                    "daynight":
-                        detection["daynight"],
-
-                    "satellite":
-                        detection["satellite"],
-
-                    "acquisition_utc":
-                        detection[
-                            "acquisition_utc"
-                        ],
-
-                    "stage_a_prediction":
-                        stage_a[
-                            "prediction"
-                        ],
-
-                    "stage_a_confidence":
-                        stage_a[
-                            "confidence"
-                        ],
-
-                    "stage_a_probabilities":
-                        stage_a[
-                            "probabilities"
-                        ],
-
-                    "stage_b_prediction":
-                        (
-                            stage_b[
-                                "prediction"
-                            ]
-                            if stage_b
-                            is not None
-                            else None
-                        ),
-
-                    "stage_b_confidence":
-                        (
-                            stage_b[
-                                "confidence"
-                            ]
-                            if stage_b
-                            is not None
-                            else None
-                        ),
-
-                    "stage_b_probabilities":
-                        (
-                            stage_b[
-                                "probabilities"
-                            ]
-                            if stage_b
-                            is not None
-                            else None
-                        ),
-
-                    "final_classification":
-                        classification[
-                            "final_classification"
-                        ],
-
-                    "explanation":
-                        classification[
-                            "explanation"
-                        ],
-
-                    "key_features":
-                        classification[
-                            "key_features"
-                        ],
-
-                    "data_quality":
-                        classification[
-                            "data_quality"
-                        ],
-                }
-            )
-
-            # =============================================
-            # POSTGIS PERSISTENCE
-            #
-            # Save the final flattened detection object.
-            # Database failure must not break the live API.
-            # =============================================
-
-            try:
-                from app.repositories.detection_repository import (
-                    upsert_detection,
-                )
-
-                upsert_detection(
-                    FIRMS_SOURCE,
-                    results[-1],
-                )
-
-            except Exception as database_exc:
-                print(
-                    "PostGIS save skipped: "
-                    f"{database_exc}"
-                )
+            return {
+                "ok": True,
+                "index": index,
+                "detection": detection,
+                "classification":
+                    classification,
+            }
 
         except Exception as exc:
+
+            return {
+                "ok": False,
+                "index": index,
+                "latitude":
+                    row.get("latitude"),
+                "longitude":
+                    row.get("longitude"),
+                "error":
+                    str(exc),
+            }
+
+
+    selected_rows = [
+        (
+            index,
+            row.copy(),
+        )
+        for index, row
+        in selected.iterrows()
+    ]
+
+
+    # If shared FIRMS persistence prefetch failed,
+    # remain sequential. Otherwise multiple workers could
+    # each trigger their own historical FIRMS download.
+    detection_workers = (
+        3
+        if shared_historical_dataframe
+        is not None
+        else 1
+    )
+
+    print(
+        f"Classification workers: "
+        f"{detection_workers}"
+    )
+
+
+    with ThreadPoolExecutor(
+        max_workers=detection_workers,
+        thread_name_prefix=
+            "theefinder-detection",
+    ) as executor:
+
+        worker_results = list(
+            executor.map(
+                classify_selected_row,
+                selected_rows,
+            )
+        )
+
+
+    # =====================================================
+    # MAIN-THREAD RESULT ASSEMBLY + POSTGIS WRITES
+    # =====================================================
+
+    for worker_result in worker_results:
+
+        if not worker_result["ok"]:
+
+            try:
+                row_index = int(
+                    worker_result[
+                        "index"
+                    ]
+                )
+
+            except Exception:
+                row_index = -1
 
             failures.append(
                 {
                     "row_index":
-                        int(cast(int | str, index)),
+                        row_index,
 
                     "latitude":
-                        row.get("latitude"),
+                        worker_result.get(
+                            "latitude"
+                        ),
 
                     "longitude":
-                        row.get("longitude"),
+                        worker_result.get(
+                            "longitude"
+                        ),
 
                     "error":
-                        str(exc),
+                        worker_result.get(
+                            "error"
+                        ),
                 }
             )
+
+            continue
+
+
+        detection = worker_result[
+            "detection"
+        ]
+
+        classification = worker_result[
+            "classification"
+        ]
+
+        stage_a = classification[
+            "stage_a"
+        ]
+
+        stage_b = classification[
+            "stage_b"
+        ]
+
+
+        result = {
+            "latitude":
+                detection["latitude"],
+
+            "longitude":
+                detection["longitude"],
+
+            "frp":
+                detection["frp"],
+
+            "confidence":
+                detection["confidence"],
+
+            "daynight":
+                detection["daynight"],
+
+            "satellite":
+                detection["satellite"],
+
+            "acquisition_utc":
+                detection[
+                    "acquisition_utc"
+                ],
+
+            "stage_a_prediction":
+                stage_a[
+                    "prediction"
+                ],
+
+            "stage_a_confidence":
+                stage_a[
+                    "confidence"
+                ],
+
+            "stage_a_probabilities":
+                stage_a[
+                    "probabilities"
+                ],
+
+            "stage_b_prediction":
+                (
+                    stage_b[
+                        "prediction"
+                    ]
+                    if stage_b
+                    is not None
+                    else None
+                ),
+
+            "stage_b_confidence":
+                (
+                    stage_b[
+                        "confidence"
+                    ]
+                    if stage_b
+                    is not None
+                    else None
+                ),
+
+            "stage_b_probabilities":
+                (
+                    stage_b[
+                        "probabilities"
+                    ]
+                    if stage_b
+                    is not None
+                    else None
+                ),
+
+            "final_classification":
+                classification[
+                    "final_classification"
+                ],
+
+            "explanation":
+                classification[
+                    "explanation"
+                ],
+
+            "key_features":
+                classification[
+                    "key_features"
+                ],
+
+            "data_quality":
+                classification[
+                    "data_quality"
+                ],
+        }
+
+
+        results.append(
+            result
+        )
+
+
+        # =============================================
+        # POSTGIS PERSISTENCE
+        #
+        # Intentionally executed here on the main
+        # request thread.
+        # =============================================
+
+        try:
+
+            from app.repositories.detection_repository import (
+                upsert_detection,
+            )
+
+            upsert_detection(
+                str(
+                    detection.get(
+                        "firms_source"
+                    )
+                    or FIRMS_SOURCE
+                ),
+                result,
+            )
+
+        except Exception as database_exc:
+
+            print(
+                "PostGIS save skipped: "
+                f"{database_exc}"
+            )
+
 
     classification_summary: dict[str, int] = {}
 

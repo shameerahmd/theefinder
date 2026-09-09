@@ -329,11 +329,11 @@ def build_pipeline(
 
         classifier = RandomForestClassifier(
 
-            n_estimators=500,
+            n_estimators=600,
 
-            max_depth=4,
+            max_depth=3,
 
-            min_samples_leaf=1,
+            min_samples_leaf=2,
 
             max_features="sqrt",
 

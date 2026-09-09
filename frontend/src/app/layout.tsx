@@ -5,17 +5,15 @@ import "leaflet/dist/leaflet.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TheeFinder",
-  description: "AI-enabled geospatial platform for industrial fire and thermal anomaly classification.",
+  title: "Thee Finder 🔥 | Fire Detection & Thermal Anomaly Classifier",
+  description: "Fire detection and thermal anomaly classification platform.",
 };
 
 interface RootLayoutProps {
   children: ReactNode;
 }
 
-export default function RootLayout({
-  children,
-}: RootLayoutProps) {
+export default function RootLayout({ children }: RootLayoutProps) {
   return (
     <html lang="en">
       <body>{children}</body>

@@ -305,7 +305,7 @@ def _cache_path(
 
 
     filename = (
-        "chennai_industrial_"
+        "chennai_industrial_v2_"
         f"{latitude_text}_"
         f"{longitude_text}_"
         f"{radius_text}.json"
@@ -482,6 +482,15 @@ def _build_query(
       (around:{radius_m},{latitude},{longitude});
 
   nwr["man_made"="works"]
+      (around:{radius_m},{latitude},{longitude});
+
+  nwr["power"="plant"]
+      (around:{radius_m},{latitude},{longitude});
+
+  nwr["man_made"="flare"]
+      (around:{radius_m},{latitude},{longitude});
+
+  nwr["landuse"="quarry"]
       (around:{radius_m},{latitude},{longitude});
 );
 out center tags;
@@ -775,6 +784,221 @@ def _extract_tags(
 
 
 # =========================================================
+# INDUSTRIAL FACILITY CLASSIFICATION
+# =========================================================
+
+FACILITY_TYPES: tuple[str, ...] = (
+    "REFINERY",
+    "POWER_PLANT",
+    "STEEL_METAL_PLANT",
+    "FACTORY",
+    "MINE_QUARRY",
+    "FLARE",
+    "GENERIC_INDUSTRIAL",
+)
+
+
+def _tag_text(
+    tags: dict[str, Any],
+    key: str,
+) -> str:
+
+    value = tags.get(
+        key
+    )
+
+    if value is None:
+        return ""
+
+    return str(
+        value
+    ).strip().lower()
+
+
+def _contains_any(
+    value: str,
+    candidates: tuple[str, ...],
+) -> bool:
+
+    return any(
+        candidate in value
+        for candidate in candidates
+    )
+
+
+def classify_industrial_facility(
+    tags: dict[str, Any],
+) -> str:
+    """
+    Convert useful OSM tags into a compact TheeFinder
+    industrial-facility category.
+
+    This is contextual GIS enrichment, not a trained
+    machine-learning classification.
+    """
+
+    industrial = _tag_text(
+        tags,
+        "industrial",
+    )
+
+    landuse = _tag_text(
+        tags,
+        "landuse",
+    )
+
+    man_made = _tag_text(
+        tags,
+        "man_made",
+    )
+
+    power = _tag_text(
+        tags,
+        "power",
+    )
+
+    name = _tag_text(
+        tags,
+        "name",
+    )
+
+    operator = _tag_text(
+        tags,
+        "operator",
+    )
+
+    product_context = " ".join(
+        value
+        for value in (
+            _tag_text(tags, "product"),
+            _tag_text(tags, "produce"),
+            _tag_text(tags, "resource"),
+            _tag_text(tags, "plant:source"),
+            name,
+            operator,
+        )
+        if value
+    )
+
+    if man_made == "flare":
+        return "FLARE"
+
+    if power == "plant":
+        return "POWER_PLANT"
+
+    if (
+        industrial
+        in {
+            "refinery",
+            "oil_refinery",
+            "petroleum_refinery",
+        }
+        or
+        _contains_any(
+            name,
+            (
+                "refinery",
+                "refineries",
+            ),
+        )
+    ):
+        return "REFINERY"
+
+    if (
+        industrial
+        in {
+            "steel_mill",
+            "metal_processing",
+            "foundry",
+        }
+        or
+        (
+            man_made == "works"
+            and
+            _contains_any(
+                product_context,
+                (
+                    "steel",
+                    "iron",
+                    "metal",
+                    "foundry",
+                    "aluminium",
+                    "aluminum",
+                ),
+            )
+        )
+    ):
+        return "STEEL_METAL_PLANT"
+
+    if (
+        industrial
+        in {
+            "mine",
+            "mining",
+        }
+        or
+        landuse == "quarry"
+        or
+        _contains_any(
+            product_context,
+            (
+                "quarry",
+                "mine",
+                "mining",
+            ),
+        )
+    ):
+        return "MINE_QUARRY"
+
+    if (
+        man_made == "works"
+        or
+        industrial
+        in {
+            "factory",
+            "manufacturing",
+            "works",
+        }
+    ):
+        return "FACTORY"
+
+    return "GENERIC_INDUSTRIAL"
+
+
+def is_legacy_model_context_feature(
+    tags: dict[str, Any],
+) -> bool:
+    """
+    True only for features that matched the original
+    TheeFinder industrial-context query.
+
+    This keeps the trained model's existing distance/count
+    distribution stable while adding extra facility context.
+    """
+
+    return (
+        _tag_text(
+            tags,
+            "landuse",
+        )
+        == "industrial"
+        or
+        bool(
+            _tag_text(
+                tags,
+                "industrial",
+            )
+        )
+        or
+        _tag_text(
+            tags,
+            "man_made",
+        )
+        == "works"
+    )
+
+
+# =========================================================
 # NORMALISE ONE OSM OBJECT
 # =========================================================
 
@@ -873,6 +1097,19 @@ def _normalise_element(
         )
 
 
+    facility_type = (
+        classify_industrial_facility(
+            tags
+        )
+    )
+
+    model_context_feature = (
+        is_legacy_model_context_feature(
+            tags
+        )
+    )
+
+
     return {
         "osm_type":
             osm_type,
@@ -916,10 +1153,41 @@ def _normalise_element(
                 "man_made"
             ),
 
+        "power":
+            optional_text(
+                "power"
+            ),
+
+        "plant_source":
+            optional_text(
+                "plant:source"
+            ),
+
+        "product":
+            optional_text(
+                "product"
+            ),
+
+        "produce":
+            optional_text(
+                "produce"
+            ),
+
+        "resource":
+            optional_text(
+                "resource"
+            ),
+
         "operator":
             optional_text(
                 "operator"
             ),
+
+        "facility_type":
+            facility_type,
+
+        "model_context_feature":
+            model_context_feature,
 
         "tags":
             tags,
@@ -1064,6 +1332,177 @@ def _normalise_payload(
 
 
     return results
+
+
+# =========================================================
+# FACILITY SUMMARY
+# =========================================================
+
+def summarise_industrial_facilities(
+    features: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Summarise enriched OSM industrial features for the API/UI.
+    """
+
+    counts = {
+        facility_type: 0
+        for facility_type
+        in FACILITY_TYPES
+    }
+
+    valid_features: list[
+        dict[str, Any]
+    ] = []
+
+
+    for feature in features:
+
+        if not isinstance(
+            feature,
+            dict,
+        ):
+            continue
+
+        facility_type = str(
+            feature.get(
+                "facility_type",
+                "GENERIC_INDUSTRIAL",
+            )
+        )
+
+        if facility_type not in counts:
+            facility_type = (
+                "GENERIC_INDUSTRIAL"
+            )
+
+        counts[
+            facility_type
+        ] += 1
+
+        valid_features.append(
+            feature
+        )
+
+
+    nearest_feature = (
+        valid_features[0]
+        if valid_features
+        else None
+    )
+
+    specialized_features = [
+        feature
+        for feature in valid_features
+        if feature.get(
+            "facility_type"
+        )
+        != "GENERIC_INDUSTRIAL"
+    ]
+
+    nearest_specialized_feature = (
+        specialized_features[0]
+        if specialized_features
+        else None
+    )
+
+
+    def feature_summary(
+        feature: dict[str, Any] | None,
+    ) -> tuple[
+        Any,
+        Any,
+        float | None,
+    ]:
+
+        if feature is None:
+            return (
+                None,
+                None,
+                None,
+            )
+
+        return (
+            feature.get(
+                "facility_type"
+            ),
+            (
+                feature.get(
+                    "name"
+                )
+                or
+                feature.get(
+                    "operator"
+                )
+            ),
+            _safe_float(
+                feature.get(
+                    "distance_m"
+                )
+            ),
+        )
+
+
+    (
+        nearest_type,
+        nearest_name,
+        nearest_distance,
+    ) = feature_summary(
+        nearest_feature
+    )
+
+    (
+        nearest_specialized_type,
+        nearest_specialized_name,
+        nearest_specialized_distance,
+    ) = feature_summary(
+        nearest_specialized_feature
+    )
+
+
+    return {
+        "nearest_industrial_type":
+            nearest_type,
+
+        "nearest_industrial_name":
+            nearest_name,
+
+        "nearest_industrial_facility_distance_m":
+            nearest_distance,
+
+        "nearest_specialized_industrial_type":
+            nearest_specialized_type,
+
+        "nearest_specialized_industrial_name":
+            nearest_specialized_name,
+
+        "nearest_specialized_industrial_distance_m":
+            nearest_specialized_distance,
+
+        "facility_type_counts":
+            counts,
+
+        "refinery_count":
+            counts["REFINERY"],
+
+        "power_plant_count":
+            counts["POWER_PLANT"],
+
+        "steel_metal_plant_count":
+            counts["STEEL_METAL_PLANT"],
+
+        "factory_count":
+            counts["FACTORY"],
+
+        "mine_quarry_count":
+            counts["MINE_QUARRY"],
+
+        "flare_count":
+            counts["FLARE"],
+
+        "generic_industrial_count":
+            counts["GENERIC_INDUSTRIAL"],
+    }
 
 
 # =========================================================

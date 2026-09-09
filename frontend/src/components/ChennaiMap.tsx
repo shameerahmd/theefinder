@@ -21,6 +21,12 @@ export interface MapDetection {
   data_quality: {
     industrial_context_ok: boolean;
     landcover_ok: boolean;
+
+    persistence_status?: string;
+    persistence_ok?: boolean | null;
+
+    road_context_status?: string;
+    road_context_ok?: boolean | null;
   };
 }
 
@@ -32,11 +38,14 @@ interface ChennaiMapProps {
 
 function getMarkerColor(classification: string): string {
   switch (classification) {
-    case "POTENTIAL_INDUSTRIAL_FIRE":
+    case "INDUSTRIAL_THERMAL_ANOMALY":
       return "#dc2626";
 
+    case "POTENTIAL_VEHICLE_FIRE":
+      return "#f97316";
+
     case "PERSISTENT_INDUSTRIAL_SOURCE":
-      return "#7c3aed";
+      return "#0ea5e9";
 
     case "FOREST_FIRE":
       return "#16a34a";
@@ -44,20 +53,31 @@ function getMarkerColor(classification: string): string {
     case "AGRICULTURAL_OPEN_BURN":
       return "#d97706";
 
+    case "UNCERTAIN_INDUSTRIAL_EVENT":
+      return "#8b5cf6";
+
     default:
       return "#475569";
   }
 }
 
 function formatConfidence(value: number | null): string {
-  if (value === null) {
+  if (value === null || value === undefined) {
     return "N/A";
   }
 
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function formatClassification(value: string): string {
+function formatClassification(value: string | null | undefined): string {
+  if (!value) {
+    return "\u2014";
+  }
+
+  if (value === "UNCERTAIN_INDUSTRIAL_EVENT") {
+    return "Needs Review";
+  }
+
   return value
     .replace(/_/g, " ")
     .toLowerCase()
@@ -70,11 +90,8 @@ export default function ChennaiMap({
   onSelect,
 }: ChennaiMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-
   const mapRef = useRef<LeafletMap | null>(null);
-
   const layerRef = useRef<LayerGroup | null>(null);
-
   const markerRefs = useRef<CircleMarker[]>([]);
 
   useEffect(() => {
@@ -117,7 +134,6 @@ export default function ChennaiMap({
 
     return () => {
       disposed = true;
-
       markerRefs.current = [];
 
       if (mapRef.current !== null) {
@@ -157,7 +173,6 @@ export default function ChennaiMap({
 
       if (detections.length === 0) {
         map.setView([12.9716, 80.2707], 9);
-
         return;
       }
 
@@ -175,77 +190,75 @@ export default function ChennaiMap({
         const marker = L.circleMarker(
           [detection.latitude, detection.longitude],
           {
-            radius: selected ? 13 : 9,
-
-            color: degraded ? "#111827" : markerColor,
-
+            radius: selected ? 12 : 8.5,
+            color: degraded ? "#111827" : "#ffffff",
             fillColor: markerColor,
-
-            fillOpacity: 0.85,
-
+            fillOpacity: selected ? 1 : 0.88,
             weight: selected ? 4 : 2,
           },
         );
 
         const stageB = detection.stage_b_prediction
           ? `
-                <div>
-                  Stage B:
-                  <strong>
-                    ${detection.stage_b_prediction}
-                  </strong>
-                </div>
-                <div>
-                  Confidence:
-                  <strong>
-                    ${formatConfidence(detection.stage_b_confidence)}
-                  </strong>
-                </div>
-              `
+              <div style="display:flex;justify-content:space-between;gap:12px;margin-top:4px;">
+                <span style="color:#64748b;">Stage B</span>
+                <strong>${formatClassification(
+                  detection.stage_b_prediction,
+                )}</strong>
+              </div>
+              <div style="display:flex;justify-content:space-between;gap:12px;margin-top:2px;">
+                <span style="color:#64748b;">Confidence</span>
+                <strong>${formatConfidence(
+                  detection.stage_b_confidence,
+                )}</strong>
+              </div>
+            `
           : "";
 
         marker.bindPopup(`
-            <div style="min-width:210px;font-family:Arial;">
-              <div style="font-weight:700;margin-bottom:8px;">
-                ${formatClassification(detection.final_classification)}
-              </div>
-
-              <div style="font-size:12px;line-height:1.7;">
-                <div>
-                  FRP:
-                  <strong>
-                    ${detection.frp.toFixed(2)} MW
-                  </strong>
-                </div>
-
-                <div>
-                  Stage A:
-                  <strong>
-                    ${detection.stage_a_prediction}
-                  </strong>
-                </div>
-
-                <div>
-                  Confidence:
-                  <strong>
-                    ${formatConfidence(detection.stage_a_confidence)}
-                  </strong>
-                </div>
-
-                ${stageB}
-
-                ${
-                  degraded
-                    ? `
-                      <div style="margin-top:8px;color:#92400e;font-weight:700;">
-                        Context data degraded
-                      </div>
-                    `
-                    : ""
-                }
-              </div>
+          <div style="min-width:220px;font-family:Arial,sans-serif;">
+            <div style="font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#64748b;">
+              TheeFinder
             </div>
-          `);
+
+            <div style="font-size:14px;font-weight:800;margin:4px 0 9px;color:#0f172a;">
+              ${formatClassification(detection.final_classification)}
+            </div>
+
+            <div style="font-size:12px;line-height:1.6;">
+              <div style="display:flex;justify-content:space-between;gap:12px;">
+                <span style="color:#64748b;">FRP</span>
+                <strong>${detection.frp.toFixed(2)} MW</strong>
+              </div>
+
+              <div style="display:flex;justify-content:space-between;gap:12px;margin-top:4px;">
+                <span style="color:#64748b;">Stage A</span>
+                <strong>${formatClassification(
+                  detection.stage_a_prediction,
+                )}</strong>
+              </div>
+
+              <div style="display:flex;justify-content:space-between;gap:12px;margin-top:2px;">
+                <span style="color:#64748b;">Confidence</span>
+                <strong>${formatConfidence(
+                  detection.stage_a_confidence,
+                )}</strong>
+              </div>
+
+              ${stageB}
+
+              ${
+                degraded
+                  ? `
+                    <div style="margin-top:8px;border-radius:7px;background:#fffbeb;padding:7px;color:#92400e;font-weight:700;">
+                      Context data degraded
+                    </div>
+                  `
+                  : ""
+              }
+            </div>
+          </div>
+        `);
 
         marker.on("click", () => {
           onSelect(index);
@@ -267,6 +280,14 @@ export default function ChennaiMap({
         });
       }
 
+      if (selectedIndex !== null && markerRefs.current[selectedIndex]) {
+        window.setTimeout(() => {
+          if (!disposed) {
+            markerRefs.current[selectedIndex]?.openPopup();
+          }
+        }, 120);
+      }
+
       window.setTimeout(() => {
         map.invalidateSize();
       }, 50);
@@ -280,12 +301,12 @@ export default function ChennaiMap({
   }, [detections, selectedIndex, onSelect]);
 
   return (
-    <div className="relative h-[620px] w-full">
+    <div className="relative h-[520px] w-full lg:h-[620px]">
       <div ref={containerRef} className="h-full w-full" />
 
       {detections.length === 0 && (
         <div className="pointer-events-none absolute inset-0 z-[500] flex items-center justify-center">
-          <div className="rounded-xl bg-white px-4 py-3 text-sm text-slate-500 shadow">
+          <div className="rounded-xl border border-slate-200 bg-white/95 px-4 py-3 text-sm text-slate-500 shadow-lg backdrop-blur">
             No Chennai thermal detections available.
           </div>
         </div>

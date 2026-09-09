@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -19,10 +20,15 @@ from app.services.feature_service import (
 from app.services.industrial_context_service import (
     fetch_industrial_context,
     haversine_distance_m,
+    summarise_industrial_facilities,
 )
 
 from app.services.landcover_service import (
     analyse_landcover,
+)
+
+from app.services.road_context_service import (
+    get_major_road_context,
 )
 
 from app.services.persistence_service import (
@@ -114,6 +120,17 @@ STAGE_B_FEATURES = (
 INDUSTRIAL_RADIUS_M = 5000
 
 LANDCOVER_RADIUS_M = 500
+
+# Live API protection.
+# Planetary Computer / rasterio may occasionally stall.
+# Never allow land-cover enrichment to block the whole
+# classification request indefinitely.
+LANDCOVER_TIMEOUT_SECONDS = 6
+
+_LANDCOVER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+)
+
 
 PERSISTENCE_DAYS = 30
 
@@ -399,6 +416,7 @@ def extract_industrial_distance(
 # INDUSTRIAL CONTEXT
 # =========================================================
 
+@lru_cache(maxsize=512)
 def get_industrial_context(
     latitude: float,
     longitude: float,
@@ -432,10 +450,24 @@ def get_industrial_context(
         )
 
 
+        # Keep trained-model distance/count features based
+        # only on the original OSM industrial feature family.
+        model_features = [
+            feature
+            for feature in features
+            if bool(
+                feature.get(
+                    "model_context_feature",
+                    True,
+                )
+            )
+        ]
+
+
         distances: list[float] = []
 
 
-        for feature in features:
+        for feature in model_features:
 
             distance = (
                 extract_industrial_distance(
@@ -463,7 +495,14 @@ def get_industrial_context(
 
 
         feature_count = len(
-            features
+            model_features
+        )
+
+
+        facility_summary = (
+            summarise_industrial_facilities(
+                features
+            )
         )
 
 
@@ -478,6 +517,9 @@ def get_industrial_context(
             "industrial_features":
                 features,
 
+            "model_industrial_features":
+                model_features,
+
             "nearest_distance_m":
                 nearest_distance,
 
@@ -492,6 +534,8 @@ def get_industrial_context(
 
             "feature_count":
                 feature_count,
+
+            **facility_summary,
         }
 
 
@@ -504,21 +548,15 @@ def get_industrial_context(
 
     except Exception as exc:
 
-        # -------------------------------------------------
-        # IMPORTANT:
-        #
-        # A failed OSM/Overpass request must NOT be
-        # interpreted as "there is no industry nearby".
-        #
-        # Therefore distance/count stay unavailable.
-        # -------------------------------------------------
-
         result = {
 
             "features":
                 [],
 
             "industrial_features":
+                [],
+
+            "model_industrial_features":
                 [],
 
             "nearest_distance_m":
@@ -535,6 +573,10 @@ def get_industrial_context(
 
             "feature_count":
                 None,
+
+            **summarise_industrial_facilities(
+                []
+            ),
         }
 
 
@@ -551,6 +593,7 @@ def get_industrial_context(
 # LAND-COVER CONTEXT
 # =========================================================
 
+@lru_cache(maxsize=512)
 def get_landcover_context(
     latitude: float,
     longitude: float,
@@ -562,12 +605,32 @@ def get_landcover_context(
 
     try:
 
-        raw_result = analyse_landcover(
-            latitude,
-            longitude,
-            radius_m=
-                LANDCOVER_RADIUS_M,
+        landcover_future = (
+            _LANDCOVER_EXECUTOR.submit(
+                analyse_landcover,
+                latitude,
+                longitude,
+                radius_m=LANDCOVER_RADIUS_M,
+            )
         )
+
+        try:
+            raw_result = (
+                landcover_future.result(
+                    timeout=
+                        LANDCOVER_TIMEOUT_SECONDS,
+                )
+            )
+
+        except FuturesTimeoutError as exc:
+
+            landcover_future.cancel()
+
+            raise TimeoutError(
+                "ESA WorldCover exceeded "
+                f"{LANDCOVER_TIMEOUT_SECONDS}s "
+                "live-enrichment deadline."
+            ) from exc
 
 
         result: dict[
@@ -657,6 +720,7 @@ def get_persistence_context(
     longitude: float,
     acquisition_utc: pd.Timestamp,
     current_frp: float,
+    historical_dataframe: pd.DataFrame | None = None,
 ) -> tuple[
     dict[str, Any],
     bool,
@@ -693,12 +757,13 @@ def get_persistence_context(
 
     try:
 
-        historical_dataframe = (
-            fetch_firms_date_range(
-                history_start,
-                history_end,
+        if historical_dataframe is None:
+            historical_dataframe = (
+                fetch_firms_date_range(
+                    history_start,
+                    history_end,
+                )
             )
-        )
 
 
         raw_result = analyse_persistence(
@@ -1317,7 +1382,7 @@ def determine_final_classification(
     ):
 
         return (
-            "POTENTIAL_INDUSTRIAL_FIRE"
+            "INDUSTRIAL_THERMAL_ANOMALY"
         )
 
 
@@ -1334,6 +1399,317 @@ def determine_final_classification(
 
     return (
         "UNCERTAIN_INDUSTRIAL_EVENT"
+    )
+
+
+
+# =========================================================
+# VEHICLE-FIRE CONTEXT RESOLVER
+#
+# This is intentionally a conservative contextual resolver.
+# It is NOT presented as a trained vehicle-fire ML class.
+# =========================================================
+
+def resolve_vehicle_fire(
+    final_classification: str,
+    stage_a: dict[str, Any],
+    stage_b: dict[str, Any] | None,
+    feature_vector: dict[str, Any],
+    latitude: float,
+    longitude: float,
+    industrial_context_ok: bool,
+    persistence_ok: bool | None,
+) -> tuple[
+    str,
+    dict[str, Any],
+    bool | None,
+    str,
+    str | None,
+]:
+
+    empty_road_context: dict[str, Any] = {
+        "nearest_major_road_distance_m":
+            None,
+        "nearest_major_road_class":
+            None,
+        "nearest_major_road_name":
+            None,
+        "nearest_major_road_ref":
+            None,
+        "major_road_count_1km":
+            None,
+    }
+
+    road_ok: bool | None = None
+    road_error: str | None = None
+    road_status = "NOT_REQUIRED"
+
+    stage_a_confidence = (
+        to_optional_float(
+            stage_a.get(
+                "confidence"
+            )
+        )
+        or 0.0
+    )
+
+    built_up = (
+        to_optional_float(
+            feature_vector.get(
+                "built_up_pct"
+            )
+        )
+    )
+
+    tree_cover = (
+        to_optional_float(
+            feature_vector.get(
+                "tree_cover_pct"
+            )
+        )
+    )
+
+    cropland = (
+        to_optional_float(
+            feature_vector.get(
+                "cropland_pct"
+            )
+        )
+    )
+
+    detections_30d = (
+        to_optional_float(
+            feature_vector.get(
+                "detections_30d"
+            )
+        )
+    )
+
+    active_days_30d = (
+        to_optional_float(
+            feature_vector.get(
+                "active_days_30d"
+            )
+        )
+    )
+
+    distance_to_industry = (
+        to_optional_float(
+            feature_vector.get(
+                "distance_to_industry_m"
+            )
+        )
+    )
+
+    industrial_count = (
+        to_optional_float(
+            feature_vector.get(
+                "industrial_feature_count_5km"
+            )
+        )
+    )
+
+    # -----------------------------------------------------
+    # Candidate selection
+    #
+    # 1. Industrial fire-like / uncertain events.
+    # 2. Low-confidence FOREST classifications in a
+    #    substantially built-up environment.
+    #
+    # This keeps road API calls conditional.
+    # -----------------------------------------------------
+
+    candidate = (
+        final_classification
+        in {
+            "INDUSTRIAL_THERMAL_ANOMALY",
+            "UNCERTAIN_INDUSTRIAL_EVENT",
+        }
+    )
+
+
+    # Vehicle resolver fail-safe: industrial context must be valid.
+    #
+    # A failed OSM/industrial lookup must never be interpreted
+    # as "weak industrial evidence".
+    if (
+        candidate
+        and
+        not industrial_context_ok
+    ):
+        return (
+            final_classification,
+            empty_road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    if not candidate:
+        return (
+            final_classification,
+            empty_road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    # Vehicle resolver fail-safe: industrial candidates require valid persistence.
+    #
+    # Do not treat unavailable history as zero persistence.
+    if (
+        final_classification
+        in {
+            "INDUSTRIAL_THERMAL_ANOMALY",
+            "UNCERTAIN_INDUSTRIAL_EVENT",
+        }
+        and
+        persistence_ok is not True
+    ):
+        return (
+            final_classification,
+            empty_road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    # -----------------------------------------------------
+    # Persistent thermal sources are poor vehicle-fire
+    # candidates.
+    # -----------------------------------------------------
+
+    if (
+        detections_30d is not None
+        and
+        detections_30d > 1
+    ):
+        return (
+            final_classification,
+            empty_road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    if (
+        active_days_30d is not None
+        and
+        active_days_30d > 1
+    ):
+        return (
+            final_classification,
+            empty_road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    road_status = "REQUESTED"
+
+    (
+        road_context,
+        road_ok,
+        road_error,
+    ) = get_major_road_context(
+        latitude,
+        longitude,
+    )
+
+    road_status = (
+        "OK"
+        if road_ok
+        else "FAILED"
+    )
+
+    if not road_ok:
+        return (
+            final_classification,
+            road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    road_distance = (
+        to_optional_float(
+            road_context.get(
+                "nearest_major_road_distance_m"
+            )
+        )
+    )
+
+    road_class = (
+        road_context.get(
+            "nearest_major_road_class"
+        )
+    )
+
+    near_major_road = (
+        road_distance is not None
+        and
+        road_distance <= 250.0
+        and
+        road_class is not None
+    )
+
+    # Industrial-fire candidates near dense mapped
+    # industrial infrastructure remain industrial.
+    #
+    # Standard rule remains deliberately conservative.
+    # A second rule handles road-aligned anomalies where
+    # the nearest mapped industrial facility is substantially
+    # far away, even when the wider 5 km area contains a
+    # moderate number of industrial features.
+    standard_weak_industry = (
+        (
+            distance_to_industry is None
+            or
+            distance_to_industry >= 750.0
+        )
+        and
+        (
+            industrial_count is None
+            or
+            industrial_count <= 25.0
+        )
+    )
+
+    very_distant_industry_exception = (
+        distance_to_industry is not None
+        and
+        distance_to_industry >= 1500.0
+        and
+        industrial_count is not None
+        and
+        industrial_count <= 40.0
+    )
+
+    weak_industrial_context = (
+        standard_weak_industry
+        or
+        very_distant_industry_exception
+    )
+
+    if (
+        near_major_road
+        and
+        weak_industrial_context
+    ):
+        return (
+            "POTENTIAL_VEHICLE_FIRE",
+            road_context,
+            road_ok,
+            road_status,
+            road_error,
+        )
+
+    return (
+        final_classification,
+        road_context,
+        road_ok,
+        road_status,
+        road_error,
     )
 
 
@@ -1540,7 +1916,7 @@ def build_explanation(
     if (
         final_classification
         ==
-        "POTENTIAL_INDUSTRIAL_FIRE"
+        "INDUSTRIAL_THERMAL_ANOMALY"
         and
         detections == 0
     ):
@@ -1621,6 +1997,7 @@ def build_explanation(
 
 def classify_detection(
     detection: dict[str, Any],
+    historical_dataframe: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
 
     # =====================================================
@@ -1761,24 +2138,41 @@ def classify_detection(
     # It does NOT use persistence.
     # =====================================================
 
-    (
-        industrial_result,
-        industrial_ok,
-        industrial_error,
-    ) = get_industrial_context(
-        latitude,
-        longitude,
-    )
+    # =====================================================
+    # PARALLEL STATIC CONTEXT
+    #
+    # Industrial OSM context and ESA WorldCover context
+    # are independent, so both requests can execute at
+    # the same time.
+    # =====================================================
 
+    with ThreadPoolExecutor(
+        max_workers=2
+    ) as executor:
 
-    (
-        landcover_result,
-        landcover_ok,
-        landcover_error,
-    ) = get_landcover_context(
-        latitude,
-        longitude,
-    )
+        industrial_future = executor.submit(
+            get_industrial_context,
+            latitude,
+            longitude,
+        )
+
+        landcover_future = executor.submit(
+            get_landcover_context,
+            latitude,
+            longitude,
+        )
+
+        (
+            industrial_result,
+            industrial_ok,
+            industrial_error,
+        ) = industrial_future.result()
+
+        (
+            landcover_result,
+            landcover_ok,
+            landcover_error,
+        ) = landcover_future.result()
 
 
     persistence_result = (
@@ -1866,6 +2260,9 @@ def classify_detection(
             timestamp,
 
             frp,
+
+            historical_dataframe=
+                historical_dataframe,
         )
 
 
@@ -1925,6 +2322,28 @@ def classify_detection(
 
 
     # =====================================================
+    # CONDITIONAL VEHICLE-FIRE CONTEXT
+    # =====================================================
+
+    (
+        final_classification,
+        road_context,
+        road_ok,
+        road_status,
+        road_error,
+    ) = resolve_vehicle_fire(
+        final_classification,
+        stage_a,
+        stage_b,
+        feature_vector,
+        latitude,
+        longitude,
+        industrial_ok,
+        persistence_ok,
+    )
+
+
+    # =====================================================
     # EXPLANATION
     # =====================================================
 
@@ -1944,6 +2363,160 @@ def classify_detection(
             landcover_ok,
         )
     )
+
+
+    # =====================================================
+    # OSM FACILITY-TYPE CONTEXT
+    # =====================================================
+
+    nearest_facility_type = (
+        industrial_result.get(
+            "nearest_specialized_industrial_type"
+        )
+        or
+        industrial_result.get(
+            "nearest_industrial_type"
+        )
+    )
+
+    nearest_facility_name = (
+        industrial_result.get(
+            "nearest_specialized_industrial_name"
+        )
+        or
+        industrial_result.get(
+            "nearest_industrial_name"
+        )
+    )
+
+    nearest_facility_distance = (
+        to_optional_float(
+            industrial_result.get(
+                "nearest_specialized_industrial_distance_m"
+            )
+        )
+    )
+
+    if nearest_facility_distance is None:
+
+        nearest_facility_distance = (
+            to_optional_float(
+                industrial_result.get(
+                    "nearest_industrial_facility_distance_m"
+                )
+            )
+        )
+
+
+    if (
+        industrial_ok
+        and
+        nearest_facility_type
+        and
+        nearest_facility_type
+        !=
+        "GENERIC_INDUSTRIAL"
+    ):
+
+        facility_label = (
+            str(
+                nearest_facility_type
+            )
+            .replace(
+                "_",
+                " ",
+            )
+            .title()
+        )
+
+        facility_name_text = (
+            f" ({nearest_facility_name})"
+            if nearest_facility_name
+            else ""
+        )
+
+        facility_distance_text = (
+            f", approximately "
+            f"{nearest_facility_distance:.0f} m away"
+            if nearest_facility_distance
+            is not None
+            else ""
+        )
+
+        explanation.insert(
+            0,
+            (
+                "Mapped OSM industrial context: "
+                f"{facility_label}"
+                f"{facility_name_text}"
+                f"{facility_distance_text}."
+            ),
+        )
+
+        explanation = explanation[:6]
+
+
+
+    if (
+        final_classification
+        ==
+        "POTENTIAL_VEHICLE_FIRE"
+    ):
+
+        road_distance = (
+            to_optional_float(
+                road_context.get(
+                    "nearest_major_road_distance_m"
+                )
+            )
+        )
+
+        road_class = (
+            road_context.get(
+                "nearest_major_road_class"
+            )
+        )
+
+        road_name = (
+            road_context.get(
+                "nearest_major_road_name"
+            )
+        )
+
+        if road_distance is not None:
+
+            road_description = (
+                str(road_name)
+                if road_name
+                else str(road_class)
+            )
+
+            explanation.insert(
+                0,
+                (
+                    "Potential vehicle-fire context: "
+                    f"thermal anomaly is approximately "
+                    f"{road_distance:.0f} m from "
+                    f"a drivable road"
+                    +
+                    (
+                        f" ({road_description})."
+                        if road_description
+                        else "."
+                    )
+                ),
+            )
+
+        explanation.insert(
+            1,
+            (
+                "Vehicle-fire classification is "
+                "contextual and should be verified "
+                "with ground or emergency-response data."
+            ),
+        )
+
+        explanation = explanation[:6]
 
 
     # =====================================================
@@ -1970,6 +2543,66 @@ def classify_detection(
         "industrial_proximity_score":
             feature_vector.get(
                 "industrial_proximity_score"
+            ),
+
+        "nearest_industrial_type":
+            industrial_result.get(
+                "nearest_industrial_type"
+            ),
+
+        "nearest_industrial_name":
+            industrial_result.get(
+                "nearest_industrial_name"
+            ),
+
+        "nearest_industrial_facility_distance_m":
+            industrial_result.get(
+                "nearest_industrial_facility_distance_m"
+            ),
+
+        "nearest_specialized_industrial_type":
+            industrial_result.get(
+                "nearest_specialized_industrial_type"
+            ),
+
+        "nearest_specialized_industrial_name":
+            industrial_result.get(
+                "nearest_specialized_industrial_name"
+            ),
+
+        "nearest_specialized_industrial_distance_m":
+            industrial_result.get(
+                "nearest_specialized_industrial_distance_m"
+            ),
+
+        "refinery_count":
+            industrial_result.get(
+                "refinery_count"
+            ),
+
+        "power_plant_count":
+            industrial_result.get(
+                "power_plant_count"
+            ),
+
+        "steel_metal_plant_count":
+            industrial_result.get(
+                "steel_metal_plant_count"
+            ),
+
+        "factory_count":
+            industrial_result.get(
+                "factory_count"
+            ),
+
+        "mine_quarry_count":
+            industrial_result.get(
+                "mine_quarry_count"
+            ),
+
+        "flare_count":
+            industrial_result.get(
+                "flare_count"
             ),
 
         "tree_cover_pct":
@@ -2001,6 +2634,26 @@ def classify_detection(
             feature_vector.get(
                 "persistence_score"
             ),
+
+        "nearest_major_road_distance_m":
+            road_context.get(
+                "nearest_major_road_distance_m"
+            ),
+
+        "nearest_major_road_class":
+            road_context.get(
+                "nearest_major_road_class"
+            ),
+
+        "nearest_major_road_name":
+            road_context.get(
+                "nearest_major_road_name"
+            ),
+
+        "major_road_count_1km":
+            road_context.get(
+                "major_road_count_1km"
+            ),
     }
 
 
@@ -2028,6 +2681,43 @@ def classify_detection(
         "key_features":
             key_features,
 
+        "industrial_context": {
+            "nearest_type":
+                industrial_result.get(
+                    "nearest_industrial_type"
+                ),
+
+            "nearest_name":
+                industrial_result.get(
+                    "nearest_industrial_name"
+                ),
+
+            "nearest_distance_m":
+                industrial_result.get(
+                    "nearest_industrial_facility_distance_m"
+                ),
+
+            "nearest_specialized_type":
+                industrial_result.get(
+                    "nearest_specialized_industrial_type"
+                ),
+
+            "nearest_specialized_name":
+                industrial_result.get(
+                    "nearest_specialized_industrial_name"
+                ),
+
+            "nearest_specialized_distance_m":
+                industrial_result.get(
+                    "nearest_specialized_industrial_distance_m"
+                ),
+
+            "facility_type_counts":
+                industrial_result.get(
+                    "facility_type_counts"
+                ),
+        },
+
         "data_quality": {
 
             "industrial_context_ok":
@@ -2050,5 +2740,14 @@ def classify_detection(
 
             "persistence_error":
                 persistence_error,
+
+            "road_context_status":
+                road_status,
+
+            "road_context_ok":
+                road_ok,
+
+            "road_context_error":
+                road_error,
         },
     }
