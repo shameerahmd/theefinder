@@ -1,4 +1,9 @@
-﻿CREATE EXTENSION IF NOT EXISTS postgis;
+﻿CREATE SCHEMA IF NOT EXISTS extensions;
+
+CREATE EXTENSION IF NOT EXISTS postgis
+WITH SCHEMA extensions;
+
+SET search_path TO public, extensions;
 
 CREATE TABLE IF NOT EXISTS thermal_detections (
     id BIGSERIAL PRIMARY KEY,
@@ -9,7 +14,7 @@ CREATE TABLE IF NOT EXISTS thermal_detections (
 
     latitude DOUBLE PRECISION NOT NULL,
     longitude DOUBLE PRECISION NOT NULL,
-    geom geometry(Point, 4326) NOT NULL,
+    geom extensions.geometry(Point, 4326) NOT NULL,
 
     frp DOUBLE PRECISION,
     confidence VARCHAR(16),
