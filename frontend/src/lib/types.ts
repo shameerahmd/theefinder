@@ -23,6 +23,21 @@ export interface KeyFeatures {
   nearest_major_road_ref?: string | null;
   major_road_count_1km?: number | null;
   road_context_source?: string | null;
+
+  nearest_industrial_type: string | null;
+  nearest_industrial_name: string | null;
+  nearest_industrial_facility_distance_m: number | null;
+
+  nearest_specialized_industrial_type: string | null;
+  nearest_specialized_industrial_name: string | null;
+  nearest_specialized_industrial_distance_m: number | null;
+
+  refinery_count: number | null;
+  power_plant_count: number | null;
+  steel_metal_plant_count: number | null;
+  factory_count: number | null;
+  mine_quarry_count: number | null;
+  flare_count: number | null;
 }
 
 export interface DataQuality {

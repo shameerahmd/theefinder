@@ -35,6 +35,21 @@ interface Detection extends MapDetection {
     nearest_major_road_name?: string | null;
     nearest_major_road_ref?: string | null;
     road_context_source?: string | null;
+
+    nearest_industrial_type?: string | null;
+    nearest_industrial_name?: string | null;
+    nearest_industrial_facility_distance_m?: number | null;
+
+    nearest_specialized_industrial_type?: string | null;
+    nearest_specialized_industrial_name?: string | null;
+    nearest_specialized_industrial_distance_m?: number | null;
+
+    refinery_count?: number | null;
+    power_plant_count?: number | null;
+    steel_metal_plant_count?: number | null;
+    factory_count?: number | null;
+    mine_quarry_count?: number | null;
+    flare_count?: number | null;
   };
 }
 
@@ -930,7 +945,93 @@ function DetectionDetails({ detection }: { detection: Detection }) {
           </div>
         </div>
       )}
+      {features &&
+        (features.nearest_specialized_industrial_type ||
+          features.nearest_industrial_type ||
+          features.refinery_count ||
+          features.power_plant_count ||
+          features.steel_metal_plant_count ||
+          features.factory_count ||
+          features.mine_quarry_count ||
+          features.flare_count) && (
+          <div>
+            <h3 className="mb-3 text-sm font-bold">
+              Industrial Facility Context
+            </h3>
 
+            <div className="overflow-hidden rounded-xl border border-slate-200">
+              <FeatureRow
+                label="Nearest Facility Type"
+                value={prettyLabel(
+                  features.nearest_specialized_industrial_type ??
+                    features.nearest_industrial_type ??
+                    "UNKNOWN",
+                )}
+              />
+
+              <FeatureRow
+                label="Facility Name"
+                value={
+                  features.nearest_specialized_industrial_name ??
+                  features.nearest_industrial_name ??
+                  "Unnamed OSM facility"
+                }
+              />
+
+              <FeatureRow
+                label="Facility Distance"
+                value={
+                  features.nearest_specialized_industrial_distance_m !== null &&
+                  features.nearest_specialized_industrial_distance_m !==
+                    undefined
+                    ? `${features.nearest_specialized_industrial_distance_m.toFixed(0)} m`
+                    : features.nearest_industrial_facility_distance_m !==
+                          null &&
+                        features.nearest_industrial_facility_distance_m !==
+                          undefined
+                      ? `${features.nearest_industrial_facility_distance_m.toFixed(0)} m`
+                      : "N/A"
+                }
+              />
+
+              <FeatureRow
+                label="Refinery OSM Matches"
+                value={features.refinery_count?.toString() ?? "0"}
+              />
+
+              <FeatureRow
+                label="Power Plant OSM Matches"
+                value={features.power_plant_count?.toString() ?? "0"}
+              />
+
+              <FeatureRow
+                label="Factory OSM Matches"
+                value={features.factory_count?.toString() ?? "0"}
+              />
+
+              <FeatureRow
+                label="Steel / Metal Plant OSM Matches"
+                value={features.steel_metal_plant_count?.toString() ?? "0"}
+              />
+
+              <FeatureRow
+                label="Mine / Quarry OSM Matches"
+                value={features.mine_quarry_count?.toString() ?? "0"}
+              />
+
+              <FeatureRow
+                label="Flare OSM Matches"
+                value={features.flare_count?.toString() ?? "0"}
+                last
+              />
+            </div>
+
+            <p className="mt-2 text-[10px] leading-4 text-slate-400">
+              Facility counts represent nearby OpenStreetMap feature matches and
+              may not equal the number of distinct physical facilities.
+            </p>
+          </div>
+        )}
       <div>
         <h3 className="mb-3 text-sm font-bold">Data Quality</h3>
 
